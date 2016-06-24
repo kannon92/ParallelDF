@@ -4,6 +4,7 @@
 #include <psifiles.h>
 #include "paralleldfjk.h"
 #include <psi4-dec.h>
+#include <lib3index/3index.h>
 #include <libqt/qt.h>
 namespace psi { namespace paralleldf {
 
@@ -26,7 +27,6 @@ void ParallelDFJK::preiterations()
     }
     ///Will compute J^{-(1/2)} (on all nodes.  Fuck it!)
     Timer Jm12_time;
-    boost::shared_ptr<Matrix> Jm12_m = Jm12(auxiliary_, 1e-12);
     outfile->Printf("\n Jm12 takes %8.8f s.", Jm12_time.get());
 }
 void ParallelDFJK::compute_JK()
@@ -98,14 +98,130 @@ void ParallelDFJK::compute_J()
                                     PHI = auxiliary_->shell(Pshell).function_index() + P;
                                     Qmnp[PHI][schwarz_fun_pairs[omu*(omu+1)/2+onu]] = buffer[rank][P*nummu*numnu + mu*numnu + nu];
                                 }
-                            }
+                            } 
                         }
                     }
                 }
             }
         }
     }
+    boost::shared_ptr<Matrix> Jm12_m = Jm12();
+
+    double** Jinvp = Jm12_m->pointer();
+
+    ULI max_cols = (memory_-three_memory-two_memory) / auxiliary_->nbf();
+    if (max_cols < 1)
+        max_cols = 1;
+    if (max_cols > ntri)
+        max_cols = ntri;
+    SharedMatrix temp(new Matrix("Qmn buffer", auxiliary_->nbf(), max_cols));
+    double** tempp = temp->pointer();
+
+    size_t nblocks = ntri / max_cols;
+    if ((ULI)nblocks*max_cols != ntri) nblocks++;
+
+    size_t ncol = 0;
+    size_t col = 0;
+
+    timer_on("JK: (Q|mn)");
+
+    for (size_t block = 0; block < nblocks; block++) {
+
+        ncol = max_cols;
+        if (col + ncol > ntri)
+            ncol = ntri - col;
+
+        C_DGEMM('N','N',auxiliary_->nbf(), ncol, auxiliary_->nbf(), 1.0,
+            Jinvp[0], auxiliary_->nbf(), &Qmnp[0][col], ntri, 0.0,
+            tempp[0], max_cols);
+
+        for (int Q = 0; Q < auxiliary_->nbf(); Q++) {
+            C_DCOPY(ncol, tempp[Q], 1, &Qmnp[Q][col], 1);
+        }
+
+        col += ncol;
+    }
+    max_nocc_ = max_nocc();
+    max_rows_ = max_rows();
+    initialize_temps();
+
+    timer_off("JK: (Q|mn)");
+    for (int Q = 0 ; Q < auxiliary_->nbf(); Q += max_rows_) {
+    int naux = (auxiliary_->nbf() - Q <= max_rows_ ? auxiliary_->nbf() - Q : max_rows_);
+        if (do_J_) {
+            timer_on("JK: J");
+            block_J(&Qmn_->pointer()[Q],naux);
+            timer_off("JK: J");
+        }
+    }
+
+
               
+}
+boost::shared_ptr<Matrix> ParallelDFJK::Jm12()
+{
+    // Everybody likes them some inverse square root metric, eh?
+
+    int nthread = 1;
+    #ifdef _OPENMP
+        nthread = omp_get_max_threads();
+    #endif
+
+    int naux = auxiliary_->nbf();
+
+    boost::shared_ptr<Matrix> J(new Matrix("J", naux, naux));
+    double** Jp = J->pointer();
+
+    boost::shared_ptr<IntegralFactory> Jfactory(new IntegralFactory(auxiliary_, BasisSet::zero_ao_basis_set(), auxiliary_, BasisSet::zero_ao_basis_set()));
+    std::vector<boost::shared_ptr<TwoBodyAOInt> > Jeri;
+    for (int thread = 0; thread < nthread; thread++) {
+        Jeri.push_back(boost::shared_ptr<TwoBodyAOInt>(Jfactory->eri()));
+    }
+
+    std::vector<std::pair<int, int> > Jpairs;
+    for (int M = 0; M < auxiliary_->nshell(); M++) {
+        for (int N = 0; N <= M; N++) {
+            Jpairs.push_back(std::pair<int,int>(M,N));
+        }
+    }
+    long int num_Jpairs = Jpairs.size();
+
+    #pragma omp parallel for schedule(dynamic) num_threads(nthread)
+    for (long int PQ = 0L; PQ < num_Jpairs; PQ++) {
+
+        int thread = 0;
+        #ifdef _OPENMP
+            thread = omp_get_thread_num();
+        #endif
+
+        std::pair<int,int> pair = Jpairs[PQ];
+        int P = pair.first;
+        int Q = pair.second;
+
+        Jeri[thread]->compute_shell(P,0,Q,0);
+
+        int np = auxiliary_->shell(P).nfunction();
+        int op = auxiliary_->shell(P).function_index();
+        int nq = auxiliary_->shell(Q).nfunction();
+        int oq = auxiliary_->shell(Q).function_index();
+
+        const double* buffer = Jeri[thread]->buffer();
+
+        for (int p = 0; p < np; p++) {
+        for (int q = 0; q < nq; q++) {
+            Jp[p + op][q + oq] =
+            Jp[q + oq][p + op] =
+                (*buffer++);
+        }}
+    }
+    Jfactory.reset();
+    Jeri.clear();
+
+    // > Invert J < //
+
+    J->power(-1.0/2.0, 1e-10);
+
+    return J;
 }
 
 }}

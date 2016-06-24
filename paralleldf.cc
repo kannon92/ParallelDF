@@ -54,28 +54,33 @@ int read_options(std::string name, Options& options)
 extern "C"
 SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
 {
-    int print = options.get_int("PRINT");
-    boost::shared_ptr<Wavefunction> scf(new scf::RHF(ref_wfn,options, PSIO::shared_object()));
+    boost::shared_ptr<Wavefunction> scf(new scf::RHF(ref_wfn, options, PSIO::shared_object()));
     double scf_energy = scf->compute_energy();
-    SharedMatrix F_target = scf->Fa();
+
+    int print = options.get_int("PRINT");
+    SharedMatrix F_target = ref_wfn->Fa();
     boost::shared_ptr<BasisSet> auxiliary = BasisSet::pyconstruct_orbital(ref_wfn->molecule(), "DF_BASIS_SCF",options.get_str("DF_BASIS_SCF"));
     boost::shared_ptr<JK> JK(new ParallelDFJK(ref_wfn->basisset(), auxiliary));
+
     JK->set_memory(Process::environment.get_memory() * 0.5);
     JK->initialize();
     std::vector<boost::shared_ptr<Matrix> >&Cl = JK->C_left();
     Cl.clear();
-    Cl.push_back(scf->Ca_subset("SO", "OCC"));
+    Cl.push_back(ref_wfn->Ca_subset("SO", "OCC"));
     JK->compute();
 
     SharedMatrix F_mine = F_target->clone();
+
     F_mine->zero();
-    F_mine->copy(scf->H());
+    F_mine->copy(ref_wfn->H());
     SharedMatrix G = JK->J()[0];
     G->scale(2.0);
     G->subtract(JK->K()[0]);
     F_mine->add(G);
     F_mine->subtract(F_target);
-    F_mine->print();
+
+    outfile->Printf("\n F_mine %8.8f", F_mine->rms());
+
     
 
 

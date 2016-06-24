@@ -8,7 +8,14 @@ class ParallelDFJK : public DFJK {
         ParallelDFJK(boost::shared_ptr<BasisSet> primary, boost::shared_ptr<BasisSet> auxiliary);
         //virtual void compute_JK();
         void common_init();   
-    //protected:
+    protected:
+        void preiterations();
+        boost::shared_ptr<Matrix> Jm12(boost::shared_ptr<BasisSet> auxiliary, double J_cutoff);
+        /// Driver function to compute J and K
+        void compute_JK();
+        /// Do a Direct DF-J build (generate integrals over batches of P)
+        void compute_J();
+        //void compute_K();
 
 };
 }}

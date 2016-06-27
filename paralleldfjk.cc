@@ -31,17 +31,6 @@ void ParallelDFJK::preiterations()
 }
 void ParallelDFJK::compute_JK()
 {
-    if(do_J_)
-    {
-        compute_J();
-    }
-    //if(do_K_)
-    //{
-    //    compute_K();
-    //}
-}
-void ParallelDFJK::compute_J()
-{
     /// This function will compute J in parallel for the number of Shell Pairs of auxiliary
     ///Gives the upper triangular size of the significant pairs after screening
     size_t ntri = sieve_->function_pairs().size();
@@ -153,10 +142,12 @@ void ParallelDFJK::compute_J()
             block_J(&Qmn_->pointer()[Q],naux);
             timer_off("JK: J");
         }
+        if(do_K_) {
+            timer_on("JK: K");
+            block_K(&Qmn_->pointer()[Q], naux);
+            timer_off("JK: K");
+        }
     }
-
-
-              
 }
 boost::shared_ptr<Matrix> ParallelDFJK::Jm12()
 {

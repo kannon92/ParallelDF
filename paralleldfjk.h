@@ -11,10 +11,8 @@ class ParallelDFJK : public DFJK {
     protected:
         void preiterations();
         boost::shared_ptr<Matrix> Jm12();
-        /// Driver function to compute J and K
+        /// Do a direct J(and/or) K build
         void compute_JK();
-        /// Do a Direct DF-J build (generate integrals over batches of P)
-        void compute_J();
         //void compute_K();
 
 };

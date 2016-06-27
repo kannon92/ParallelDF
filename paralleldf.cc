@@ -68,6 +68,8 @@ SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
     Cl.push_back(ref_wfn->Ca_subset("SO", "OCC"));
     JK_DFJK->compute();
     SharedMatrix F_target = JK_DFJK->J()[0];
+    F_target->scale(2.0);
+    F_target->subtract(JK_DFJK->K()[0]);
 
     /// Compute the ParallelDFJK
     boost::shared_ptr<JK> JK_Parallel(new ParallelDFJK(ref_wfn->basisset(), auxiliary));
@@ -79,15 +81,11 @@ SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
 
 
     SharedMatrix F_mine = JK_Parallel->J()[0];
-    //G->scale(2.0);
-    //G->subtract(JK_Parallel->K()[0]);
+    F_mine->scale(2.0);
+    F_mine->subtract(JK_Parallel->K()[0]);
     F_mine->subtract(F_target);
 
     outfile->Printf("\n F_mine %8.8f", F_mine->rms());
-
-    
-
-
 
 
     return ref_wfn;

@@ -6,6 +6,7 @@
 #include <psi4-dec.h>
 #include <lib3index/3index.h>
 #include <libqt/qt.h>
+//#include <mpi.h>
 namespace psi { namespace paralleldf {
 
 ParallelDFJK::ParallelDFJK(boost::shared_ptr<BasisSet> primary, boost::shared_ptr<BasisSet> auxiliary) : DFJK(primary, auxiliary)
@@ -36,6 +37,9 @@ void ParallelDFJK::compute_JK()
     size_t ntri = sieve_->function_pairs().size();
     ULI three_memory = ((ULI)auxiliary_->nbf())*ntri;
     ULI two_memory = ((ULI)auxiliary_->nbf())*auxiliary_->nbf();
+    //int nproc = MPI::COMM_WORLD.Get_size();
+
+    //std::vector<std::pair<int, int> > my_aux_tasks = auxiliary_tasks(auxiliary_->nbf(), nproc);
 
     int nthread = 1;
     #ifdef _OPENMP
@@ -64,10 +68,21 @@ void ParallelDFJK::compute_JK()
     int numP,Pshell,MU,NU,P,PHI,mu,nu,nummu,numnu,omu,onu;
 
     //timer_on("JK: (A|mn)");
+    outfile->Printf("\n Nshell: %d", auxiliary_->nshell());
 
-    //The integrals (A|mn)
-    #pragma omp parallel for private (numP, Pshell, MU, NU, P, PHI, mu, nu, nummu, numnu, omu, onu, rank) schedule (dynamic) num_threads(nthread)
     for (Pshell=0; Pshell < auxiliary_->nshell(); ++Pshell) {
+        outfile->Printf("\n Shell: %d NumP: %d\n\n", auxiliary_->nshell(), auxiliary_->shell(Pshell).nfunction());
+        outfile->Printf("\n Fnct Index \n");
+        for(int P = 0; P < auxiliary_->shell(Pshell).nfunction(); P++)
+        {
+            int function_index = auxiliary_->shell(Pshell).function_index() + P;
+            outfile->Printf(" %d", function_index);
+        }
+    }
+        
+    //The integrals (A|mn)
+    for (Pshell=0; Pshell < auxiliary_->nshell(); ++Pshell) {
+    #pragma omp parallel for private (numP, Pshell, MU, NU, P, PHI, mu, nu, nummu, numnu, omu, onu, rank) schedule (dynamic) num_threads(nthread)
         for (MU=0; MU < primary_->nshell(); ++MU) {
             #ifdef _OPENMP
                 rank = omp_get_thread_num();
@@ -132,6 +147,7 @@ void ParallelDFJK::compute_JK()
     }
     max_nocc_ = max_nocc();
     max_rows_ = max_rows();
+    outfile->Printf("\n max_rows: %d max_nocc: %d", max_rows_, max_nocc_);
     initialize_temps();
 
     timer_off("JK: (Q|mn)");
@@ -213,6 +229,39 @@ boost::shared_ptr<Matrix> ParallelDFJK::Jm12()
     J->power(-1.0/2.0, 1e-10);
 
     return J;
+}
+void ParallelDFJK::block_J(double** Qmnp, int naux)
+{
+    const std::vector<std::pair<int, int> >& function_pairs = sieve_->function_pairs();
+    unsigned long int num_nm = function_pairs.size();
+
+    for (size_t N = 0; N < J_ao_.size(); N++) {
+
+        double** Dp   = D_ao_[N]->pointer();
+        double** Jp   = J_ao_[N]->pointer();
+        double*  J2p  = J_temp_->pointer();
+        double*  D2p  = D_temp_->pointer();
+        double*  dp   = d_temp_->pointer();
+        for (unsigned long int mn = 0; mn < num_nm; ++mn) {
+            int m = function_pairs[mn].first;
+            int n = function_pairs[mn].second;
+            D2p[mn] = (m == n ? Dp[m][n] : Dp[m][n] + Dp[n][m]);
+        }
+
+        timer_on("JK: J1");
+        C_DGEMV('N',naux,num_nm,1.0,Qmnp[0],num_nm,D2p,1,0.0,dp,1);
+        timer_off("JK: J1");
+
+        timer_on("JK: J2");
+        C_DGEMV('T',naux,num_nm,1.0,Qmnp[0],num_nm,dp,1,0.0,J2p,1);
+        timer_off("JK: J2");
+        for (unsigned long int mn = 0; mn < num_nm; ++mn) {
+            int m = function_pairs[mn].first;
+            int n = function_pairs[mn].second;
+            Jp[m][n] += J2p[mn];
+            Jp[n][m] += (m == n ? 0.0 : J2p[mn]);
+        }
+    }
 }
 
 }}

@@ -13,7 +13,8 @@ class ParallelDFJK : public DFJK {
         boost::shared_ptr<Matrix> Jm12();
         /// Do a direct J(and/or) K build
         void compute_JK();
-        //void compute_K();
+        void block_J(double** Qmnp, int naux);
+        //void block_K(double** Qmnp, int naux);
 
 };
 }}

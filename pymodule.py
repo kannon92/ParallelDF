@@ -55,7 +55,6 @@ def run_paralleldf(name, **kwargs):
 
     # Compute a SCF reference, a wavefunction is return which holds the molecule used, orbitals
     # Fock matrices, and more
-    print('Attention! This SCF may be density-fitted.')
     ref_wfn = kwargs.get('ref_wfn', None)
     if ref_wfn is None:
         ref_wfn = driver.scf_helper(name, **kwargs)

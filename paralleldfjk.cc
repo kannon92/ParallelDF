@@ -6,6 +6,7 @@
 #include <psi4-dec.h>
 #include <lib3index/3index.h>
 #include <libqt/qt.h>
+#include <omp.h>
 //#include <mpi.h>
 namespace psi { namespace paralleldf {
 

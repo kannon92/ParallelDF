@@ -8,15 +8,13 @@ class ParallelDFMO {
         void set_C(boost::shared_ptr<Matrix> C);
         void compute_integrals();
     protected:
-        SharedMatrix C_ao_;
+        SharedMatrix Ca_;
         /// (A | Q)^{-1/2}
         int J_one_half();
         ///Compute (A|mn) integrals (distribute via mn indices)
-        void compute_A_mn();
-        /// (A_pq) = (A | mu nu) C_{mu p} C_{nu q}
-        void compute_A_pq();
+        int transform_integrals();
         /// (A | pq) (A | Q)^{-1/2}
-        void compute_Q_pq();
+        int compute_Q_pq();
 
         boost::shared_ptr<BasisSet> primary_;
         boost::shared_ptr<BasisSet> auxiliary_;
@@ -25,5 +23,8 @@ class ParallelDFMO {
         int GA_Q_PQ_;
         /// GA for J^{-1/2}
         int GA_J_onehalf_;
+        
+        size_t memory_;
+        size_t nmo_;
 };
 }}

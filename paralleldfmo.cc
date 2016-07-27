@@ -18,7 +18,11 @@ ParallelDFMO::ParallelDFMO(boost::shared_ptr<BasisSet> primary, boost::shared_pt
     outfile->Printf("\n ParallelDFJK");
     memory_ = Process::environment.get_memory();
 }
-int ParallelDFMO::transform_integrals()
+void ParallelDFMO::compute_integrals()
+{
+    transform_integrals();
+}
+void ParallelDFMO::transform_integrals()
 {
     // > Sizing < //
 
@@ -121,21 +125,34 @@ int ParallelDFMO::transform_integrals()
     // > Three-index buffers < //
     boost::shared_ptr<Matrix> Amn(new Matrix("(A|mn)", max_rows, nso * (unsigned long int) nso));
     boost::shared_ptr<Matrix> Ami(new Matrix("(A|mi)", max_rows, nso * (unsigned long int) max1));
-    boost::shared_ptr<Matrix> Aia(new Matrix("(A|ia)", max_rows, max12));
+    boost::shared_ptr<Matrix> Aia(new Matrix("(A|ia)", naux, max12));
     double** Amnp = Amn->pointer();
     double** Amip = Ami->pointer();
     double** Aiap = Aia->pointer();
+    int dims[2];
+    int chunk[2];
+    dims[0] = naux;
+    dims[1] = nso * nso;
+    chunk[0] = GA_Nnodes();
+    chunk[1] = nso * nso;
+    int Aia_ga = NGA_Create(C_DBL, 2, dims, (char *)"Aia_temp", chunk);
+    GA_Q_PQ_ = GA_Duplicate(Aia_ga, (char *)"Q|PQ");
+    GA_Print_distribution(Aia_ga);
 
+    for (int block = 0; block < shell_starts.size() - 1; block++) {
+        outfile->Printf("\n Pstart: %d Pstop: %d", shell_starts[block], shell_starts[block+1]);
+    }
     // > C-matrix weirdness < //
 
     double** Cp = Ca_->pointer();
     int lda = nmo_;
 
-    // ==> Master Loop <== //
+    //// ==> Master Loop <== //
 
+    int Aia_begin[2];
+    int Aia_end[2];
     for (int block = 0; block < shell_starts.size() - 1; block++) {
-
-        // > Block characteristics < //
+    //    // > Block characteristics < //
         int Pstart = shell_starts[block];
         int Pstop  = shell_starts[block+1];
         int nPshell = Pstop - Pstart;
@@ -230,11 +247,19 @@ int ParallelDFMO::transform_integrals()
         //boost::shared_ptr<Tensor> A = ints_[name + "_temp"];
         //FILE* fh = A->file_pointer();
         //fwrite(Aiap[0],sizeof(double),rows*n12,fh);
+        int ld = nso * nso;
+        
+        NGA_Distribution(Aia_ga, GA_Nodeid(), Aia_begin, Aia_end);
+        NGA_Put(Aia_ga, Aia_begin, Aia_end, Aiap[0], &(ld));
             //}
         //}
     }
+    J_one_half();
+    GA_Dgemm('T', 'N', naux, nso * nso, naux, 1.0, GA_J_onehalf_, Aia_ga, 0.0, GA_Q_PQ_);
+    GA_Print(GA_Q_PQ_);
+    
 }
-int ParallelDFMO::J_one_half()
+void ParallelDFMO::J_one_half()
 {
     // Everybody likes them some inverse square root metric, eh?
 
@@ -317,7 +342,5 @@ int ParallelDFMO::J_one_half()
     }
     GA_Print(GA_J_onehalf_);
     GA_Print_distribution(GA_J_onehalf_);
-
-    return GA_J_onehalf_;
 }
 }}

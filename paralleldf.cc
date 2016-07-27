@@ -38,6 +38,8 @@
 #include <libthce/lreri.h>
 #include "paralleldfjk.h"
 #include "paralleldfmo.h"
+#include <ga.h>
+#include <macdecls.h>
 
 using namespace boost;
 
@@ -58,7 +60,7 @@ int read_options(std::string name, Options& options)
 extern "C"
 SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
 {
-    int print = options.get_int("PRINT");
+    GA_Initialize();
     boost::shared_ptr<BasisSet> auxiliary = BasisSet::pyconstruct_orbital(ref_wfn->molecule(), "DF_BASIS_SCF",options.get_str("DF_BASIS_SCF"));
     int naux = auxiliary->nbf();
     SharedMatrix Ca = ref_wfn->Ca();
@@ -91,7 +93,10 @@ SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
     fread(&Bpq->pointer()[0][0], sizeof(double), naux * nmo * nmo, Bf);
     outfile->Printf("\n Bpq norm: %8.8f", Bpq->rms());
 
-    std::shared_ptr<ParallelDFMO> DFMO(new ParallelDFMO(ref_wfn->basisset(), auxiliary));
+    ParallelDFMO DFMO = ParallelDFMO(ref_wfn->basisset(), auxiliary);
+    DFMO.set_C(Ca_ao);
+    DFMO.compute_integrals();
+
 
     /// Compute the PSI4 DFJK
     /// Compare against this code in all stages
@@ -122,6 +127,7 @@ SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
 
     //outfile->Printf("\n F_mine %8.8f", F_mine->rms());
 
+    GA_Terminate();
     return ref_wfn;
 }
 

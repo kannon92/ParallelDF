@@ -60,7 +60,7 @@ int read_options(std::string name, Options& options)
 extern "C"
 SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
 {
-    GA_Initialize();
+    GA_Initialize_ltd(Process::environment.get_memory());
     boost::shared_ptr<BasisSet> auxiliary = BasisSet::pyconstruct_orbital(ref_wfn->molecule(), "DF_BASIS_SCF",options.get_str("DF_BASIS_SCF"));
     int naux = auxiliary->nbf();
     SharedMatrix Ca = ref_wfn->Ca();
@@ -91,7 +91,7 @@ SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
     SharedMatrix Bpq(new Matrix("Bpq", nmo * nmo, naux));
     fseek(Bf, 0L, SEEK_SET);
     fread(&Bpq->pointer()[0][0], sizeof(double), naux * nmo * nmo, Bf);
-    outfile->Printf("\n Bpq norm: %8.8f", Bpq->rms());
+    Bpq->print();
 
     ParallelDFMO DFMO = ParallelDFMO(ref_wfn->basisset(), auxiliary);
     DFMO.set_C(Ca_ao);

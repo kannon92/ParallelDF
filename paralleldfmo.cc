@@ -257,6 +257,8 @@ void ParallelDFMO::transform_integrals()
     J_one_half();
     GA_Dgemm('T', 'N', naux, nso * nso, naux, 1.0, GA_J_onehalf_, Aia_ga, 0.0, GA_Q_PQ_);
     GA_Print(GA_Q_PQ_);
+    GA_Destroy(GA_J_onehalf_);
+    GA_Destroy(Aia_ga);
     
 }
 void ParallelDFMO::J_one_half()
@@ -340,7 +342,5 @@ void ParallelDFMO::J_one_half()
             NGA_Put(GA_J_onehalf_, begin_offset, end_offset, J->pointer()[0], &naux);
         }
     }
-    GA_Print(GA_J_onehalf_);
-    GA_Print_distribution(GA_J_onehalf_);
 }
 }}

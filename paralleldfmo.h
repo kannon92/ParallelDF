@@ -5,16 +5,18 @@ namespace psi { namespace paralleldf {
 class ParallelDFMO {
     public:
         ParallelDFMO(boost::shared_ptr<BasisSet> primary, boost::shared_ptr<BasisSet> auxiliary);
-        void set_C(boost::shared_ptr<Matrix> C);
+        void set_C(boost::shared_ptr<Matrix> C)
+        {
+            Ca_ = C;
+        }
         void compute_integrals();
     protected:
         SharedMatrix Ca_;
         /// (A | Q)^{-1/2}
-        int J_one_half();
+        void J_one_half();
         ///Compute (A|mn) integrals (distribute via mn indices)
-        int transform_integrals();
+        void transform_integrals();
         /// (A | pq) (A | Q)^{-1/2}
-        int compute_Q_pq();
 
         boost::shared_ptr<BasisSet> primary_;
         boost::shared_ptr<BasisSet> auxiliary_;

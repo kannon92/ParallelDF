@@ -42,20 +42,6 @@ void ParallelDFMO::transform_integrals()
     size_t max1 = nmo_;
     size_t max12 = max1 * max1;
 
-    //for (int i = 0; i < pair_spaces_order_.size(); i++) {
-    //    std::string name = pair_spaces_order_[i];
-    //    std::string space1 = pair_spaces_[name].first;
-    //    std::string space2 = pair_spaces_[name].second;
-
-    //    int size1 = spaces_[space1].second - spaces_[space1].first;
-    //    int size2 = spaces_[space2].second - spaces_[space2].first;
-
-    //    size_t size12 = size1 * (size_t) size2;
-
-    //    max1 = (max1 < size1 ? size1 : max1);
-    //    max12 = (max12 < size12 ? size12 : max12);
-    //}
-
     // > Row requirements < //
 
     unsigned long int per_row = 0L;
@@ -74,37 +60,79 @@ void ParallelDFMO::transform_integrals()
         throw PSIEXCEPTION("Out of memory in DFERI.");
     }
     max_rows = (max_rows > auxiliary_->nbf() ? auxiliary_->nbf() : max_rows);
+    int shell_per_process = 0;
+    int shell_start = -1;
+    int shell_end = -1;
+    /// MPI Environment 
+    int my_rank = GA_Nodeid();
+    int num_proc = GA_Nnodes();
 
+    if(auxiliary_->nbf() == max_rows)
+    {
+       shell_per_process = auxiliary_->nshell() / num_proc;
+    }
+    else {
+        throw PSIEXCEPTION("Have not implemented memory bound df integrals");
+    }
+    ///Have first proc be from 0 to shell_per_process
+    ///Last proc is shell_per_process * my_rank to naux
+    if(my_rank != (num_proc - 1))
+    {
+        shell_start = shell_per_process * my_rank;
+        shell_end   = shell_per_process * (my_rank + 1);
+    }
+    else 
+    {
+        shell_start = shell_per_process * my_rank;
+        shell_end = (auxiliary_->nshell() % num_proc == 0 ? shell_per_process * (my_rank + 1) : auxiliary_->nshell());
+    }
+
+    //printf("\n P%d shell_per_process: %d shell_start:%d  shell_end:%d", my_rank, shell_per_process, shell_start, shell_end);
     // > Shell block assignments < //
 
-    std::vector<int> shell_starts;
-    shell_starts.push_back(0);
-    int fcount = auxiliary_->shell(0).nfunction();
-    for (int Q = 1; Q < auxiliary_->nshell(); Q++) {
-        if (fcount + auxiliary_->shell(Q).nfunction() > max_rows) {
-            shell_starts.push_back(Q);
-            fcount = auxiliary_->shell(Q).nfunction();
-        } else {
-            fcount += auxiliary_->shell(Q).nfunction();
+    //int fcount = auxiliary_->shell(0).nfunction();
+    //std::vector<int> shell_starts(auxiliary_->nshell() + 1, 0);
+    //shell_starts[0] = 0;
+    //for (int Q = 1; Q < auxiliary_->nshell(); Q++) {
+    //    if (fcount + auxiliary_->shell(Q).nfunction() > max_rows) {
+    //        shell_starts[Q] = Q;
+    //        fcount = auxiliary_->shell(Q).nfunction();
+    //    } else {
+    //        fcount += auxiliary_->shell(Q).nfunction();
+    //    }
+    //}
+    //shell_starts.push_back(auxiliary_->nshell());
+
+    int function_start = auxiliary_->shell(shell_start).function_index();
+    int function_end = (shell_end == auxiliary_->nshell() ? auxiliary_->nbf() : auxiliary_->shell(shell_end).function_index());
+    printf("\n P%d function_start: %d function_end: %d", my_rank, function_start, function_end);
+    int dims[2];
+    int chunk[2];
+    dims[0] = naux;
+    dims[1] = nso * nso;
+    chunk[0] = GA_Nnodes();
+    chunk[1] = 1;
+    int map[GA_Nnodes() + 1];
+    for(int iproc = 0; iproc < GA_Nnodes(); iproc++)
+    {
+        int shell_start = 0;
+        int shell_end = 0;
+        if(iproc != (num_proc - 1))
+        {
+            shell_start = shell_per_process * iproc;
+            shell_end   = shell_per_process * (iproc + 1);
         }
+        else 
+        {
+            shell_start = shell_per_process * iproc; 
+            shell_end = (auxiliary_->nshell() % num_proc == 0 ? shell_per_process * (iproc + 1) : auxiliary_->nshell());
+        }
+        int function_start = auxiliary_->shell(shell_start).function_index();
+        map[iproc] = function_start;
     }
-    shell_starts.push_back(auxiliary_->nshell());
-
-    // > Task printing (Debug) < //
-
-    //outfile->Printf("Auxiliary Composition:\n\n");
-    //for (int Q = 0; Q < auxiliary_->nshell(); Q++) {
-    //    outfile->Printf("%3d: %2d\n", Q, auxiliary_->shell(Q).nfunction());
-    //}
-    //outfile->Printf("\n");
-
-    //outfile->Printf("Max Rows: %zu\n\n", max_rows);
-
-    //outfile->Printf("Task Starts:\n\n");
-    //for (int task = 0; task < shell_starts.size() - 1; task++) {
-    //    outfile->Printf("%3d: %3d\n", task, shell_starts[task]);
-    //}
-    //outfile->Printf("\n");
+    map[GA_Nnodes()] = 0;
+    int Aia_ga = NGA_Create_irreg(C_DBL, 2, dims, (char *)"Aia_temp", chunk, map);
+    GA_Q_PQ_ = GA_Duplicate(Aia_ga, (char *)"Q|PQ");
 
     // => ERI Objects <= //
 
@@ -129,19 +157,8 @@ void ParallelDFMO::transform_integrals()
     double** Amnp = Amn->pointer();
     double** Amip = Ami->pointer();
     double** Aiap = Aia->pointer();
-    int dims[2];
-    int chunk[2];
-    dims[0] = naux;
-    dims[1] = nso * nso;
-    chunk[0] = GA_Nnodes();
-    chunk[1] = nso * nso;
-    int Aia_ga = NGA_Create(C_DBL, 2, dims, (char *)"Aia_temp", chunk);
-    GA_Q_PQ_ = GA_Duplicate(Aia_ga, (char *)"Q|PQ");
     GA_Print_distribution(Aia_ga);
 
-    for (int block = 0; block < shell_starts.size() - 1; block++) {
-        outfile->Printf("\n Pstart: %d Pstop: %d", shell_starts[block], shell_starts[block+1]);
-    }
     // > C-matrix weirdness < //
 
     double** Cp = Ca_->pointer();
@@ -151,10 +168,11 @@ void ParallelDFMO::transform_integrals()
 
     int Aia_begin[2];
     int Aia_end[2];
-    for (int block = 0; block < shell_starts.size() - 1; block++) {
+    //for (int block = shell_start; block < shell_end; block++) {
     //    // > Block characteristics < //
-        int Pstart = shell_starts[block];
-        int Pstop  = shell_starts[block+1];
+    {
+        int Pstart = shell_start;
+        int Pstop  = shell_end;
         int nPshell = Pstop - Pstart;
         int pstart = auxiliary_->shell(Pstart).function_index();
         int pstop = (Pstop == auxiliary_->nshell() ? auxiliary_->nbf() : auxiliary_->shell(Pstop).function_index());
@@ -255,8 +273,7 @@ void ParallelDFMO::transform_integrals()
         //}
     }
     J_one_half();
-    GA_Dgemm('T', 'N', naux, nso * nso, naux, 1.0, GA_J_onehalf_, Aia_ga, 0.0, GA_Q_PQ_);
-    GA_Print(GA_Q_PQ_);
+    //GA_Dgemm('T', 'N', naux, nso * nso, naux, 1.0, GA_J_onehalf_, Aia_ga, 0.0, GA_Q_PQ_);
     GA_Destroy(GA_J_onehalf_);
     GA_Destroy(Aia_ga);
     
@@ -329,8 +346,8 @@ void ParallelDFMO::J_one_half()
         int chunk[2];
         dims[0] = naux;
         dims[1] = naux;
-        chunk[0] = -1;
-        chunk[1] = -1;
+        chunk[0] = naux;
+        chunk[1] = naux;
         GA_J_onehalf_ = NGA_Create(C_DBL, 2, dims, (char *)"J_1/2", chunk);
         if(not GA_J_onehalf_)
             throw PSIEXCEPTION("Failure in creating J_^(-1/2) in GA");

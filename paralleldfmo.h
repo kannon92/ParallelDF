@@ -10,6 +10,7 @@ class ParallelDFMO {
             Ca_ = C;
         }
         void compute_integrals();
+        int Q_PQ(){return GA_Q_PQ_;}
     protected:
         SharedMatrix Ca_;
         /// (A | Q)^{-1/2}

@@ -42,9 +42,16 @@
 #include <macdecls.h>
 
 using namespace boost;
+void* replace_malloc(size_t bytes, int align, char *name)
+{
+    return malloc(bytes);
+}
+void replace_free(void *ptr)
+{
+    free(ptr);
+}
 
 namespace psi{ namespace paralleldf {
-double check_df();
 
 extern "C"
 int read_options(std::string name, Options& options)
@@ -60,7 +67,11 @@ int read_options(std::string name, Options& options)
 extern "C"
 SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
 {
-    GA_Initialize_ltd(Process::environment.get_memory());
+    GA_Initialize();
+//    if(not MA_init(C_DBL, Process::environment.get_memory(), Process::environment.get_memory()))
+//        GA_Error("MA_INIT Failed", -1);
+    GA_Register_stack_memory(replace_malloc, replace_free);
+        
     boost::shared_ptr<BasisSet> auxiliary = BasisSet::pyconstruct_orbital(ref_wfn->molecule(), "DF_BASIS_SCF",options.get_str("DF_BASIS_SCF"));
     int naux = auxiliary->nbf();
     SharedMatrix Ca = ref_wfn->Ca();
@@ -96,6 +107,27 @@ SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
     ParallelDFMO DFMO = ParallelDFMO(ref_wfn->basisset(), auxiliary);
     DFMO.set_C(Ca_ao);
     DFMO.compute_integrals();
+    int MY_DF = DFMO.Q_PQ();
+    //GA_Print(MY_DF);
+    SharedMatrix Local_Bpq(new Matrix("Local_Bpq",nmo * nmo, naux));
+    int ld[1];
+    ld[0] = nmo * nmo;
+    std::vector<double> b_buffer(nmo * nmo * naux, 0);
+    for(int i = 0; i < GA_Nnodes(); i++)
+    {
+        int begin_offset[2];
+        int end_offset[2];
+        NGA_Distribution(MY_DF, i, begin_offset, end_offset);
+        printf("\n offset[0] = (%d, %d) offset[1] = (%d, %d)", begin_offset[0], end_offset[0], begin_offset[1], end_offset[1]);
+        NGA_Get(MY_DF, begin_offset, end_offset, &b_buffer[0], ld);
+    }
+    for(int i = 0; i < naux; i++)
+        for(int pq = 0; pq < nmo * nmo; pq++){
+            size_t offset = i * nmo * nmo;
+            Local_Bpq->set(pq, i, b_buffer[offset + pq]);
+    }
+    if(GA_Nodeid() == 0) Local_Bpq->subtract(Bpq);
+    if(GA_Nodeid() == 0) outfile->Printf("\n Local_Bpq rms: %8.8f", Local_Bpq->rms());
 
 
     /// Compute the PSI4 DFJK

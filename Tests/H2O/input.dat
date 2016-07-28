@@ -1,4 +1,5 @@
 import paralleldf
+memory 1 gb
 
 molecule H20 {
 0 1
@@ -9,9 +10,9 @@ units bohr
 }
 
 set globals {
-    basis sto-3g
-    df_basis_scf cc-pvdz-jkfit
-    df_basis_mp2 cc-pvdz-ri
+    basis        cc-pvqz
+    df_basis_scf cc-pvqz-jkfit
+    df_basis_mp2 cc-pvqz-ri
     scf_type     df
     reference    RHF
     guess        read

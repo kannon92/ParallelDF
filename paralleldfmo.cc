@@ -19,7 +19,11 @@ ParallelDFMO::ParallelDFMO(boost::shared_ptr<BasisSet> primary, boost::shared_pt
 }
 void ParallelDFMO::compute_integrals()
 {
+    Timer compute_integrals_time;
+    timer_on("DFMO: transform_integrals()");
     transform_integrals();
+    printf("\n P%d compute_integrals_time: %8.6f ", GA_Nodeid(),compute_integrals_time.get());
+    timer_off("DFMO: transform_integrals()");
 }
 void ParallelDFMO::transform_integrals()
 {
@@ -104,7 +108,6 @@ void ParallelDFMO::transform_integrals()
 
     int function_start = auxiliary_->shell(shell_start).function_index();
     int function_end = (shell_end == auxiliary_->nshell() ? auxiliary_->nbf() : auxiliary_->shell(shell_end).function_index());
-    printf("\n P%d function_start: %d function_end: %d", my_rank, function_start, function_end);
     int dims[2];
     int chunk[2];
     dims[0] = naux;
@@ -127,7 +130,9 @@ void ParallelDFMO::transform_integrals()
             shell_end = (auxiliary_->nshell() % num_proc == 0 ? shell_per_process * (iproc + 1) : auxiliary_->nshell());
         }
         int function_start = auxiliary_->shell(shell_start).function_index();
+        int function_end = (shell_end == auxiliary_->nshell() ? auxiliary_->nbf() : auxiliary_->shell(shell_end).function_index());
         map[iproc] = function_start;
+        outfile->Printf("\n  P%d shell_start: %d shell_end: %d function_start: %d function_end: %d", iproc, shell_start, shell_end, function_start, function_end);
     }
     map[GA_Nnodes()] = 0;
     int Aia_ga = NGA_Create_irreg(C_DBL, 2, dims, (char *)"Aia_temp", chunk, map);
@@ -178,6 +183,7 @@ void ParallelDFMO::transform_integrals()
     ///shell_start represents the start of shells for this processor
     ///shell_end represents the end of shells for this processor
     ///NOTE:  This code will have terrible load balance (shells do not correspond to equal number of functions
+    Timer compute_Aia;
     {
         int Pstart = shell_start;
         int Pstop  = shell_end;
@@ -190,7 +196,6 @@ void ParallelDFMO::transform_integrals()
 
         ::memset((void*) Amnp[0], '\0', sizeof(double) * rows * nso * nso);
 
-        printf("\n P%d pstart: %d pstop: %d", my_rank, pstart, pstop);
         #pragma omp parallel for schedule(dynamic) num_threads(nthread)
         for (long int PMN = 0L; PMN < nPshell * nshell_pairs; PMN++) {
 
@@ -281,9 +286,15 @@ void ParallelDFMO::transform_integrals()
             //}
         //}
     }
-    J_one_half();
+    printf("\n  P%d Aia took %8.6f s.", GA_Nodeid(), compute_Aia.get());
 
+    Timer J_one_half_time;
+    J_one_half();
+    printf("\n  P%d J^({-1/2}} took %8.6f s.", GA_Nodeid(), J_one_half_time.get());
+
+    Timer GA_DGEMM;
     GA_Dgemm('T', 'N', naux, nmo_ * nmo_, naux, 1.0, GA_J_onehalf_, Aia_ga, 0.0, GA_Q_PQ_);
+    printf("\n  P%d DGEMM took %8.6f s.", GA_Nodeid(), GA_DGEMM.get());
     GA_Destroy(GA_J_onehalf_);
     GA_Destroy(Aia_ga);
 }
@@ -367,7 +378,6 @@ void ParallelDFMO::J_one_half()
             int end_offset[2];
             NGA_Distribution(GA_J_onehalf_, me, begin_offset, end_offset);
             int offset = begin_offset[0];
-            printf("\n ME: %d begin_offset: (%d, %d) end_offset: (%d, %d)", me, begin_offset[0], begin_offset[1], end_offset[0], end_offset[1]);
             NGA_Put(GA_J_onehalf_, begin_offset, end_offset, J->pointer()[offset], &naux);
         }
     }

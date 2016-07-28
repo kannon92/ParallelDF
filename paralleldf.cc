@@ -102,7 +102,7 @@ SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
     SharedMatrix Bpq(new Matrix("Bpq", nmo * nmo, naux));
     fseek(Bf, 0L, SEEK_SET);
     fread(&Bpq->pointer()[0][0], sizeof(double), naux * nmo * nmo, Bf);
-    Bpq->print();
+    //Bpq->print();
 
     ParallelDFMO DFMO = ParallelDFMO(ref_wfn->basisset(), auxiliary);
     DFMO.set_C(Ca_ao);
@@ -112,22 +112,25 @@ SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
     SharedMatrix Local_Bpq(new Matrix("Local_Bpq",nmo * nmo, naux));
     int ld[1];
     ld[0] = nmo * nmo;
-    std::vector<double> b_buffer(nmo * nmo * naux, 0);
-    for(int i = 0; i < GA_Nnodes(); i++)
+    if(GA_Nodeid == 0)
     {
-        int begin_offset[2];
-        int end_offset[2];
-        NGA_Distribution(MY_DF, i, begin_offset, end_offset);
-        printf("\n offset[0] = (%d, %d) offset[1] = (%d, %d)", begin_offset[0], end_offset[0], begin_offset[1], end_offset[1]);
-        NGA_Get(MY_DF, begin_offset, end_offset, &b_buffer[0], ld);
+        std::vector<double> b_buffer(nmo * nmo * naux, 0);
+        for(int i = 0; i < GA_Nnodes(); i++)
+        {
+            int begin_offset[2];
+            int end_offset[2];
+            NGA_Distribution(MY_DF, i, begin_offset, end_offset);
+            printf("\n offset[0] = (%d, %d) offset[1] = (%d, %d)", begin_offset[0], end_offset[0], begin_offset[1], end_offset[1]);
+            NGA_Get(MY_DF, begin_offset, end_offset, &b_buffer[begin_offset[0]], ld);
+        }
+        for(int i = 0; i < naux; i++)
+            for(int pq = 0; pq < nmo * nmo; pq++){
+                size_t offset = i * nmo * nmo;
+                Local_Bpq->set(pq, i, b_buffer[offset + pq]);
+        }
+        Local_Bpq->subtract(Bpq);
     }
-    for(int i = 0; i < naux; i++)
-        for(int pq = 0; pq < nmo * nmo; pq++){
-            size_t offset = i * nmo * nmo;
-            Local_Bpq->set(pq, i, b_buffer[offset + pq]);
-    }
-    if(GA_Nodeid() == 0) Local_Bpq->subtract(Bpq);
-    if(GA_Nodeid() == 0) outfile->Printf("\n Local_Bpq rms: %8.8f", Local_Bpq->rms());
+    outfile->Printf("\n Local_Bpq rms: %8.8f", Local_Bpq->rms());
 
 
     /// Compute the PSI4 DFJK

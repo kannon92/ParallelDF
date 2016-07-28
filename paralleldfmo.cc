@@ -15,7 +15,6 @@ namespace psi { namespace paralleldf {
 
 ParallelDFMO::ParallelDFMO(boost::shared_ptr<BasisSet> primary, boost::shared_ptr<BasisSet> auxiliary) : primary_(primary), auxiliary_(auxiliary)
 {
-    outfile->Printf("\n ParallelDFJK");
     memory_ = Process::environment.get_memory();
 }
 void ParallelDFMO::compute_integrals()
@@ -132,7 +131,15 @@ void ParallelDFMO::transform_integrals()
     }
     map[GA_Nnodes()] = 0;
     int Aia_ga = NGA_Create_irreg(C_DBL, 2, dims, (char *)"Aia_temp", chunk, map);
+    if(not Aia_ga)
+    {
+        throw PSIEXCEPTION("GA failed on creating Aia_ga");
+    }
     GA_Q_PQ_ = GA_Duplicate(Aia_ga, (char *)"Q|PQ");
+    if(not GA_Q_PQ_)
+    {
+        throw PSIEXCEPTION("GA failed on creating GA_Q_PQ");
+    }
 
     // => ERI Objects <= //
 
@@ -157,7 +164,6 @@ void ParallelDFMO::transform_integrals()
     double** Amnp = Amn->pointer();
     double** Amip = Ami->pointer();
     double** Aiap = Aia->pointer();
-    GA_Print_distribution(Aia_ga);
 
     // > C-matrix weirdness < //
 
@@ -168,8 +174,10 @@ void ParallelDFMO::transform_integrals()
 
     int Aia_begin[2];
     int Aia_end[2];
-    //for (int block = shell_start; block < shell_end; block++) {
-    //    // > Block characteristics < //
+    /// SIMD 
+    ///shell_start represents the start of shells for this processor
+    ///shell_end represents the end of shells for this processor
+    ///NOTE:  This code will have terrible load balance (shells do not correspond to equal number of functions
     {
         int Pstart = shell_start;
         int Pstop  = shell_end;
@@ -182,6 +190,7 @@ void ParallelDFMO::transform_integrals()
 
         ::memset((void*) Amnp[0], '\0', sizeof(double) * rows * nso * nso);
 
+        printf("\n P%d pstart: %d pstop: %d", my_rank, pstart, pstop);
         #pragma omp parallel for schedule(dynamic) num_threads(nthread)
         for (long int PMN = 0L; PMN < nPshell * nshell_pairs; PMN++) {
 
@@ -265,7 +274,7 @@ void ParallelDFMO::transform_integrals()
         //boost::shared_ptr<Tensor> A = ints_[name + "_temp"];
         //FILE* fh = A->file_pointer();
         //fwrite(Aiap[0],sizeof(double),rows*n12,fh);
-        int ld = nso * nso;
+        int ld = nmo_ * nmo_;
         
         NGA_Distribution(Aia_ga, GA_Nodeid(), Aia_begin, Aia_end);
         NGA_Put(Aia_ga, Aia_begin, Aia_end, Aiap[0], &(ld));
@@ -273,10 +282,10 @@ void ParallelDFMO::transform_integrals()
         //}
     }
     J_one_half();
-    //GA_Dgemm('T', 'N', naux, nso * nso, naux, 1.0, GA_J_onehalf_, Aia_ga, 0.0, GA_Q_PQ_);
+
+    GA_Dgemm('T', 'N', naux, nmo_ * nmo_, naux, 1.0, GA_J_onehalf_, Aia_ga, 0.0, GA_Q_PQ_);
     GA_Destroy(GA_J_onehalf_);
     GA_Destroy(Aia_ga);
-    
 }
 void ParallelDFMO::J_one_half()
 {
@@ -291,6 +300,16 @@ void ParallelDFMO::J_one_half()
 
     boost::shared_ptr<Matrix> J(new Matrix("J", naux, naux));
     double** Jp = J->pointer();
+
+    int dims[2];
+    int chunk[2];
+    dims[0] = naux;
+    dims[1] = naux;
+    chunk[0] = -1;
+    chunk[1] = naux;
+    GA_J_onehalf_ = NGA_Create(C_DBL, 2, dims, (char *)"J_1/2", chunk);
+    if(not GA_J_onehalf_)
+        throw PSIEXCEPTION("Failure in creating J_^(-1/2) in GA");
 
     if(GA_Nodeid() == 0)
     {
@@ -342,21 +361,14 @@ void ParallelDFMO::J_one_half()
         // > Invert J < //
 
         J->power(-1.0/2.0, 1e-10);
-        int dims[2];
-        int chunk[2];
-        dims[0] = naux;
-        dims[1] = naux;
-        chunk[0] = naux;
-        chunk[1] = naux;
-        GA_J_onehalf_ = NGA_Create(C_DBL, 2, dims, (char *)"J_1/2", chunk);
-        if(not GA_J_onehalf_)
-            throw PSIEXCEPTION("Failure in creating J_^(-1/2) in GA");
         for(int me = 0; me < GA_Nnodes(); me++)
         {
             int begin_offset[2];
             int end_offset[2];
             NGA_Distribution(GA_J_onehalf_, me, begin_offset, end_offset);
-            NGA_Put(GA_J_onehalf_, begin_offset, end_offset, J->pointer()[0], &naux);
+            int offset = begin_offset[0];
+            printf("\n ME: %d begin_offset: (%d, %d) end_offset: (%d, %d)", me, begin_offset[0], begin_offset[1], end_offset[0], end_offset[1]);
+            NGA_Put(GA_J_onehalf_, begin_offset, end_offset, J->pointer()[offset], &naux);
         }
     }
 }

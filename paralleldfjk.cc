@@ -36,6 +36,18 @@ void ParallelDFJK::preiterations()
 }
 void ParallelDFJK::compute_JK()
 {
+    if(do_J_)
+    {
+        Timer compute_local_j;
+        compute_J();
+        printf("\n P%d computing J", GA_Nodeid(), compute_local_j.get());
+    }
+    if(do_K_)
+    {
+        Timer compute_local_k;
+        compute_K();
+        printf("\n P%d computing K", GA_Nodeid(), compute_local_k.get());
+    }
 }
 void ParallelDFJK::J_one_half()
 {
@@ -259,8 +271,8 @@ void ParallelDFJK::compute_qmn()
 
     // => ERI Sieve <= //
 
-    boost::shared_ptr<ERISieve> sieve(new ERISieve(primary_, 1e-10));
-    const std::vector<std::pair<int,int> >& shell_pairs = sieve->shell_pairs();
+    //boost::shared_ptr<ERISieve> sieve(new ERISieve(primary_, 1e-10));
+    const std::vector<std::pair<int,int> >& shell_pairs = sieve_->shell_pairs();
     long int nshell_pairs = (long int) shell_pairs.size();
 
     // => Temporary Tensors <= //
@@ -342,6 +354,57 @@ void ParallelDFJK::compute_qmn()
 
 
 }
+void ParallelDFJK::compute_J()
+{
+    int naux = auxiliary_->nbf();
+    std::vector<double> J_V(naux, 0);
+    const std::vector<std::pair<int, int> >& function_pairs = sieve_->function_pairs();
+    unsigned long int num_nm = function_pairs.size();
+    
+    SharedVector J_temp(new Vector("Jtemp", num_nm));
+    SharedVector D_temp(new Vector("Jtemp", num_nm));
+    double* D_tempp = D_temp->pointer();
+    int begin_offset[2];
+    int end_offset[2];
+    ///Start a loop over the densities
+    for(size_t N = 0; N < J_ao_.size(); N++)
+    {
+        double** Dp = D_ao_[N]->pointer();
+        double** Jp = J_ao_[N]->pointer();
+        for(size_t mn = 0; mn < num_nm; mn++) {
+            int m = function_pairs[mn].first;
+            int n = function_pairs[mn].second;
+            D_tempp[mn] = (m == n ? Dp[m][n] : Dp[m][n] + Dp[n][m]);
+        }
+
+        ///Since Q_UV_GA is distributed via NAUX index,
+        ///need to get locality information (where data is located)
+        NGA_Distribution(Q_UV_GA_,GA_Nodeid(), begin_offset, end_offset);
+        int nso = D_ao_[N]->rowspi()[0];
+        size_t q_uv_size = (end_offset[0] - begin_offset[0] + 1) * nso * nso;
+        std::vector<double> q_uv_temp(q_uv_size, 0);
+        //double* q_uv_temp = new double[q_uv_size];
+        int stride = nso * nso;
+        ///Directly use the pointer information that is available to me
+        NGA_Access(Q_UV_GA_, begin_offset, end_offset, &q_uv_temp[0], &stride);
+        ///J_V = B^Q_{pq} D_{pq}
+        C_DGEMV('N', naux, num_nm, 1.0, &q_uv_temp[0], num_nm, D_tempp, 1, 0.0, &J_V[begin_offset[0]], 1);
+        ///J_{uv} = B^{Q}_{uv} J_V^{Q}
+        C_DGEMV('T', naux, num_nm, 1.0, &q_uv_temp[0], num_nm, &J_V[begin_offset[0]], 1, 0.0, J_temp->pointer(), 1);
+        ///Delete the patch of memory
+        NGA_Release(Q_UV_GA_, begin_offset, end_offset);
+        for(size_t mn = 0; mn < num_nm; mn++) {
+            int m = function_pairs[mn].first;
+            int n = function_pairs[mn].second;
+            Jp[m][n] += J_temp->pointer()[mn];
+            Jp[n][m] += (m == n ? 0.0 : J_temp->pointer()[mn]);
+
+        }
+    }
+}
+void ParallelDFJK::compute_K()
+{
+}
 void ParallelDFJK::postiterations()
 {
     GA_Destroy(Q_UV_GA_);
@@ -350,5 +413,8 @@ void ParallelDFJK::print_header() const
 {
     outfile->Printf("\n Computing DFJK using %d Processes and %d threads", GA_Nnodes(), omp_get_max_threads());
 }
+//void ParallelDFJK::create_temp()
+//{
+//}
 
 }}

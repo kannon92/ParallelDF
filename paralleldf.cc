@@ -68,8 +68,6 @@ extern "C"
 SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
 {
     GA_Initialize();
-//    if(not MA_init(C_DBL, Process::environment.get_memory(), Process::environment.get_memory()))
-//        GA_Error("MA_INIT Failed", -1);
     GA_Register_stack_memory(replace_malloc, replace_free);
         
     boost::shared_ptr<BasisSet> auxiliary = BasisSet::pyconstruct_orbital(ref_wfn->molecule(), "DF_BASIS_SCF",options.get_str("DF_BASIS_SCF"));
@@ -135,32 +133,32 @@ SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
 
     /// Compute the PSI4 DFJK
     /// Compare against this code in all stages
-    //boost::shared_ptr<JK> JK_DFJK(new DFJK(ref_wfn->basisset(), auxiliary));
-    //JK_DFJK->set_memory(Process::environment.get_memory() * 0.5);
-    //JK_DFJK->initialize();
-    //std::vector<boost::shared_ptr<Matrix> >&Cl = JK_DFJK->C_left();
-    //Cl.clear();
-    //Cl.push_back(ref_wfn->Ca_subset("SO", "OCC"));
-    //JK_DFJK->compute();
-    //SharedMatrix F_target = JK_DFJK->J()[0];
-    //F_target->scale(2.0);
-    //F_target->subtract(JK_DFJK->K()[0]);
+    boost::shared_ptr<JK> JK_DFJK(new DFJK(ref_wfn->basisset(), auxiliary));
+    JK_DFJK->set_memory(Process::environment.get_memory() * 0.5);
+    JK_DFJK->initialize();
+    std::vector<boost::shared_ptr<Matrix> >&Cl = JK_DFJK->C_left();
+    Cl.clear();
+    Cl.push_back(ref_wfn->Ca_subset("SO", "OCC"));
+    JK_DFJK->compute();
+    SharedMatrix F_target = JK_DFJK->J()[0];
+    F_target->scale(2.0);
+    F_target->subtract(JK_DFJK->K()[0]);
 
-    ///// Compute the ParallelDFJK
-    //boost::shared_ptr<JK> JK_Parallel(new ParallelDFJK(ref_wfn->basisset(), auxiliary));
-    //JK_Parallel->set_memory(Process::environment.get_memory() * 0.5);
-    //JK_Parallel->initialize();
-    //std::vector<boost::shared_ptr<Matrix> >&C_parallel = JK_Parallel->C_left();
-    //C_parallel.push_back(ref_wfn->Ca_subset("SO", "OCC"));
-    //JK_Parallel->compute();
+    /// Compute the ParallelDFJK
+    boost::shared_ptr<JK> JK_Parallel(new ParallelDFJK(ref_wfn->basisset(), auxiliary));
+    JK_Parallel->set_memory(Process::environment.get_memory() * 0.5);
+    JK_Parallel->initialize();
+    std::vector<boost::shared_ptr<Matrix> >&C_parallel = JK_Parallel->C_left();
+    C_parallel.push_back(ref_wfn->Ca_subset("SO", "OCC"));
+    JK_Parallel->compute();
 
 
-    //SharedMatrix F_mine = JK_Parallel->J()[0];
-    //F_mine->scale(2.0);
-    //F_mine->subtract(JK_Parallel->K()[0]);
-    //F_mine->subtract(F_target);
+    SharedMatrix F_mine = JK_Parallel->J()[0];
+    F_mine->scale(2.0);
+    F_mine->subtract(JK_Parallel->K()[0]);
+    F_mine->subtract(F_target);
 
-    //outfile->Printf("\n F_mine %8.8f", F_mine->rms());
+    outfile->Printf("\n F_mine %8.8f", F_mine->rms());
 
     GA_Terminate();
     return ref_wfn;

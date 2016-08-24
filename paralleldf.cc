@@ -110,7 +110,7 @@ SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
     SharedMatrix Local_Bpq(new Matrix("Local_Bpq",nmo * nmo, naux));
     int ld[1];
     ld[0] = nmo * nmo;
-    if(GA_Nodeid == 0)
+    if(GA_Nodeid() == 0)
     {
         std::vector<double> b_buffer(nmo * nmo * naux, 0);
         for(int i = 0; i < GA_Nnodes(); i++)

@@ -7,18 +7,19 @@
 #include <lib3index/3index.h>
 #include <libqt/qt.h>
 #include <omp.h>
+#include <ga.h>
+#include <macdecls.h>
 //#include <mpi.h>
 namespace psi { namespace paralleldf {
 
-ParallelDFJK::ParallelDFJK(boost::shared_ptr<BasisSet> primary, boost::shared_ptr<BasisSet> auxiliary) : DFJK(primary, auxiliary)
+ParallelDFJK::ParallelDFJK(boost::shared_ptr<BasisSet> primary, boost::shared_ptr<BasisSet> auxiliary) : JK(primary), auxiliary_(auxiliary)
 {
     common_init();
 }
 void ParallelDFJK::common_init()
 {
-    unit_ = PSIF_DFSCF_BJ;
-    psio_ = PSIO::shared_object();
     outfile->Printf("\n ParallelDFJK");
+    memory_ = Process::environment.get_memory();
 }
 void ParallelDFJK::preiterations()
 {
@@ -27,146 +28,16 @@ void ParallelDFJK::preiterations()
     {
         sieve_ = boost::shared_ptr<ERISieve>(new ERISieve(primary_, cutoff_));    
     }
+    //create_ga_arrays();
     ///Will compute J^{-(1/2)} (on all nodes.  Fuck it!)
     Timer Jm12_time;
     outfile->Printf("\n Jm12 takes %8.8f s.", Jm12_time.get());
+    compute_qmn();
 }
 void ParallelDFJK::compute_JK()
 {
-    /// This function will compute J in parallel for the number of Shell Pairs of auxiliary
-    ///Gives the upper triangular size of the significant pairs after screening
-    size_t ntri = sieve_->function_pairs().size();
-    ULI three_memory = ((ULI)auxiliary_->nbf())*ntri;
-    ULI two_memory = ((ULI)auxiliary_->nbf())*auxiliary_->nbf();
-    //int nproc = MPI::COMM_WORLD.Get_size();
-
-    //std::vector<std::pair<int, int> > my_aux_tasks = auxiliary_tasks(auxiliary_->nbf(), nproc);
-
-    int nthread = 1;
-    #ifdef _OPENMP
-        nthread = df_ints_num_threads_;
-    #endif
-    int rank = 0;
-
-    ///Parallel code only needs to store block of auxiliary indices
-    Qmn_ = SharedMatrix(new Matrix("Qmn (Fitted Integrals)",
-        auxiliary_->nbf(), ntri));
-    double** Qmnp = Qmn_->pointer();
-
-    //Get a TEI for each thread
-    boost::shared_ptr<BasisSet> zero = BasisSet::zero_ao_basis_set();
-    boost::shared_ptr<IntegralFactory> rifactory(new IntegralFactory(auxiliary_, zero, primary_, primary_));
-    const double **buffer = new const double*[nthread];
-    boost::shared_ptr<TwoBodyAOInt> *eri = new boost::shared_ptr<TwoBodyAOInt>[nthread];
-    for (int Q = 0; Q<nthread; Q++) {
-        eri[Q] = boost::shared_ptr<TwoBodyAOInt>(rifactory->eri());
-        buffer[Q] = eri[Q]->buffer();
-    }
-
-    const std::vector<long int>& schwarz_shell_pairs = sieve_->shell_pairs_reverse();
-    const std::vector<long int>& schwarz_fun_pairs = sieve_->function_pairs_reverse();
-
-    int numP,Pshell,MU,NU,P,PHI,mu,nu,nummu,numnu,omu,onu;
-
-    //timer_on("JK: (A|mn)");
-    outfile->Printf("\n Nshell: %d", auxiliary_->nshell());
-
-    for (Pshell=0; Pshell < auxiliary_->nshell(); ++Pshell) {
-        outfile->Printf("\n Shell: %d NumP: %d\n\n", auxiliary_->nshell(), auxiliary_->shell(Pshell).nfunction());
-        outfile->Printf("\n Fnct Index \n");
-        for(int P = 0; P < auxiliary_->shell(Pshell).nfunction(); P++)
-        {
-            int function_index = auxiliary_->shell(Pshell).function_index() + P;
-            outfile->Printf(" %d", function_index);
-        }
-    }
-        
-    //The integrals (A|mn)
-    for (Pshell=0; Pshell < auxiliary_->nshell(); ++Pshell) {
-    #pragma omp parallel for private (numP, Pshell, MU, NU, P, PHI, mu, nu, nummu, numnu, omu, onu, rank) schedule (dynamic) num_threads(nthread)
-        for (MU=0; MU < primary_->nshell(); ++MU) {
-            #ifdef _OPENMP
-                rank = omp_get_thread_num();
-            #endif
-            nummu = primary_->shell(MU).nfunction();
-            for (NU=0; NU <= MU; ++NU) {
-                numnu = primary_->shell(NU).nfunction();
-                if (schwarz_shell_pairs[MU*(MU+1)/2+NU] > -1) {
-                    numP = auxiliary_->shell(Pshell).nfunction();
-                    eri[rank]->compute_shell(Pshell, 0, MU, NU);
-                    for (mu=0 ; mu < nummu; ++mu) {
-                        omu = primary_->shell(MU).function_index() + mu;
-                        for (nu=0; nu < numnu; ++nu) {
-                            onu = primary_->shell(NU).function_index() + nu;
-                            if(omu>=onu && schwarz_fun_pairs[omu*(omu+1)/2+onu] > -1) {
-                                for (P=0; P < numP; ++P) {
-                                    PHI = auxiliary_->shell(Pshell).function_index() + P;
-                                    Qmnp[PHI][schwarz_fun_pairs[omu*(omu+1)/2+onu]] = buffer[rank][P*nummu*numnu + mu*numnu + nu];
-                                }
-                            } 
-                        }
-                    }
-                }
-            }
-        }
-    }
-    boost::shared_ptr<Matrix> Jm12_m = Jm12();
-
-    double** Jinvp = Jm12_m->pointer();
-
-    ULI max_cols = (memory_-three_memory-two_memory) / auxiliary_->nbf();
-    if (max_cols < 1)
-        max_cols = 1;
-    if (max_cols > ntri)
-        max_cols = ntri;
-    SharedMatrix temp(new Matrix("Qmn buffer", auxiliary_->nbf(), max_cols));
-    double** tempp = temp->pointer();
-
-    size_t nblocks = ntri / max_cols;
-    if ((ULI)nblocks*max_cols != ntri) nblocks++;
-
-    size_t ncol = 0;
-    size_t col = 0;
-
-    timer_on("JK: (Q|mn)");
-
-    for (size_t block = 0; block < nblocks; block++) {
-
-        ncol = max_cols;
-        if (col + ncol > ntri)
-            ncol = ntri - col;
-
-        C_DGEMM('N','N',auxiliary_->nbf(), ncol, auxiliary_->nbf(), 1.0,
-            Jinvp[0], auxiliary_->nbf(), &Qmnp[0][col], ntri, 0.0,
-            tempp[0], max_cols);
-
-        for (int Q = 0; Q < auxiliary_->nbf(); Q++) {
-            C_DCOPY(ncol, tempp[Q], 1, &Qmnp[Q][col], 1);
-        }
-
-        col += ncol;
-    }
-    max_nocc_ = max_nocc();
-    max_rows_ = max_rows();
-    outfile->Printf("\n max_rows: %d max_nocc: %d", max_rows_, max_nocc_);
-    initialize_temps();
-
-    timer_off("JK: (Q|mn)");
-    for (int Q = 0 ; Q < auxiliary_->nbf(); Q += max_rows_) {
-    int naux = (auxiliary_->nbf() - Q <= max_rows_ ? auxiliary_->nbf() - Q : max_rows_);
-        if (do_J_) {
-            timer_on("JK: J");
-            block_J(&Qmn_->pointer()[Q],naux);
-            timer_off("JK: J");
-        }
-        if(do_K_) {
-            timer_on("JK: K");
-            block_K(&Qmn_->pointer()[Q], naux);
-            timer_off("JK: K");
-        }
-    }
 }
-boost::shared_ptr<Matrix> ParallelDFJK::Jm12()
+void ParallelDFJK::J_one_half()
 {
     // Everybody likes them some inverse square root metric, eh?
 
@@ -179,6 +50,16 @@ boost::shared_ptr<Matrix> ParallelDFJK::Jm12()
 
     boost::shared_ptr<Matrix> J(new Matrix("J", naux, naux));
     double** Jp = J->pointer();
+
+    int dims[2];
+    int chunk[2];
+    dims[0] = naux;
+    dims[1] = naux;
+    chunk[0] = -1;
+    chunk[1] = naux;
+    J_12_GA_ = NGA_Create(C_DBL, 2, dims, (char *)"J_1/2", chunk);
+    if(not J_12_GA_)
+        throw PSIEXCEPTION("Failure in creating J_^(-1/2) in GA");
 
     boost::shared_ptr<IntegralFactory> Jfactory(new IntegralFactory(auxiliary_, BasisSet::zero_ao_basis_set(), auxiliary_, BasisSet::zero_ao_basis_set()));
     std::vector<boost::shared_ptr<TwoBodyAOInt> > Jeri;
@@ -228,41 +109,246 @@ boost::shared_ptr<Matrix> ParallelDFJK::Jm12()
     // > Invert J < //
 
     J->power(-1.0/2.0, 1e-10);
-
-    return J;
+    if(GA_Nodeid() == 0)
+    {
+        for(int me = 0; me < GA_Nnodes(); me++)
+        {
+            int begin_offset[2];
+            int end_offset[2];
+            NGA_Distribution(J_12_GA_, me, begin_offset, end_offset);
+            int offset = begin_offset[0];
+            NGA_Put(J_12_GA_, begin_offset, end_offset, J->pointer()[offset], &naux);
+        }
+    }
 }
 void ParallelDFJK::block_J(double** Qmnp, int naux)
 {
-    const std::vector<std::pair<int, int> >& function_pairs = sieve_->function_pairs();
-    unsigned long int num_nm = function_pairs.size();
+    //const std::vector<std::pair<int, int> >& function_pairs = sieve_->function_pairs();
+    //unsigned long int num_nm = function_pairs.size();
 
-    for (size_t N = 0; N < J_ao_.size(); N++) {
+    //for (size_t N = 0; N < J_ao_.size(); N++) {
 
-        double** Dp   = D_ao_[N]->pointer();
-        double** Jp   = J_ao_[N]->pointer();
-        double*  J2p  = J_temp_->pointer();
-        double*  D2p  = D_temp_->pointer();
-        double*  dp   = d_temp_->pointer();
-        for (unsigned long int mn = 0; mn < num_nm; ++mn) {
-            int m = function_pairs[mn].first;
-            int n = function_pairs[mn].second;
-            D2p[mn] = (m == n ? Dp[m][n] : Dp[m][n] + Dp[n][m]);
-        }
+    //    //double** Dp   = D_ao_[N]->pointer();
+    //    //double** Jp   = J_ao_[N]->pointer();
+    //    //double*  J2p  = J_temp_->pointer();
+    //    //double*  D2p  = D_temp_->pointer();
+    //    //double*  dp   = d_temp_->pointer();
+    //    //for (unsigned long int mn = 0; mn < num_nm; ++mn) {
+    //    //    int m = function_pairs[mn].first;
+    //    //    int n = function_pairs[mn].second;
+    //    //    D2p[mn] = (m == n ? Dp[m][n] : Dp[m][n] + Dp[n][m]);
+    //    //}
 
-        timer_on("JK: J1");
-        C_DGEMV('N',naux,num_nm,1.0,Qmnp[0],num_nm,D2p,1,0.0,dp,1);
-        timer_off("JK: J1");
+    //    timer_on("JK: J1");
+    //    C_DGEMV('N',naux,num_nm,1.0,Qmnp[0],num_nm,D2p,1,0.0,dp,1);
+    //    timer_off("JK: J1");
 
-        timer_on("JK: J2");
-        C_DGEMV('T',naux,num_nm,1.0,Qmnp[0],num_nm,dp,1,0.0,J2p,1);
-        timer_off("JK: J2");
-        for (unsigned long int mn = 0; mn < num_nm; ++mn) {
-            int m = function_pairs[mn].first;
-            int n = function_pairs[mn].second;
-            Jp[m][n] += J2p[mn];
-            Jp[n][m] += (m == n ? 0.0 : J2p[mn]);
-        }
+    //    timer_on("JK: J2");
+    //    C_DGEMV('T',naux,num_nm,1.0,Qmnp[0],num_nm,dp,1,0.0,J2p,1);
+    //    timer_off("JK: J2");
+    //    for (unsigned long int mn = 0; mn < num_nm; ++mn) {
+    //        int m = function_pairs[mn].first;
+    //        int n = function_pairs[mn].second;
+    //        Jp[m][n] += J2p[mn];
+    //        Jp[n][m] += (m == n ? 0.0 : J2p[mn]);
+    //    }
+    //}
+}
+void ParallelDFJK::compute_qmn()
+{
+// > Sizing < //
+
+    int nso = primary_->nbf();
+    int naux = auxiliary_->nbf();
+
+    // > Threading < //
+
+    int nthread = 1;
+    #ifdef _OPENMP
+        nthread = omp_get_max_threads();
+    #endif
+
+    // > Row requirements < //
+
+    unsigned long int per_row = 0L;
+    // (Q|mn)
+    per_row += nso * (unsigned long int) nso;
+
+    // > Maximum number of rows < //
+
+    unsigned long int max_rows = (memory_ / per_row);
+    //max_rows = 3L * auxiliary_->max_function_per_shell(); // Debug
+    if (max_rows < auxiliary_->max_function_per_shell()) {
+        throw PSIEXCEPTION("Out of memory in DFERI.");
     }
+    max_rows = (max_rows > auxiliary_->nbf() ? auxiliary_->nbf() : max_rows);
+    int shell_per_process = 0;
+    int shell_start = -1;
+    int shell_end = -1;
+    /// MPI Environment 
+    int my_rank = GA_Nodeid();
+    int num_proc = GA_Nnodes();
+
+    if(auxiliary_->nbf() == max_rows)
+    {
+       shell_per_process = auxiliary_->nshell() / num_proc;
+    }
+    else {
+        throw PSIEXCEPTION("Have not implemented memory bound df integrals");
+    }
+    ///Have first proc be from 0 to shell_per_process
+    ///Last proc is shell_per_process * my_rank to naux
+    if(my_rank != (num_proc - 1))
+    {
+        shell_start = shell_per_process * my_rank;
+        shell_end   = shell_per_process * (my_rank + 1);
+    }
+    else
+    {
+        shell_start = shell_per_process * my_rank;
+        shell_end = (auxiliary_->nshell() % num_proc == 0 ? shell_per_process * (my_rank + 1) : auxiliary_->nshell());
+    }
+
+    int function_start = auxiliary_->shell(shell_start).function_index();
+    int function_end = (shell_end == auxiliary_->nshell() ? auxiliary_->nbf() : auxiliary_->shell(shell_end).function_index());
+    int dims[2];
+    int chunk[2];
+    dims[0] = naux;
+    dims[1] = nso * nso;
+    chunk[0] = GA_Nnodes();
+    chunk[1] = 1;
+    int map[GA_Nnodes() + 1];
+    for(int iproc = 0; iproc < GA_Nnodes(); iproc++)
+    {
+        int shell_start = 0;
+        int shell_end = 0;
+        if(iproc != (num_proc - 1))
+        {
+            shell_start = shell_per_process * iproc;
+            shell_end   = shell_per_process * (iproc + 1);
+        }
+        else
+        {
+            shell_start = shell_per_process * iproc;
+            shell_end = (auxiliary_->nshell() % num_proc == 0 ? shell_per_process * (iproc + 1) : auxiliary_->nshell());
+        }
+        int function_start = auxiliary_->shell(shell_start).function_index();
+        int function_end = (shell_end == auxiliary_->nshell() ? auxiliary_->nbf() : auxiliary_->shell(shell_end).function_index());
+        map[iproc] = function_start;
+        outfile->Printf("\n  P%d shell_start: %d shell_end: %d function_start: %d function_end: %d", iproc, shell_start, shell_end, function_start, function_end);
+    }
+    map[GA_Nnodes()] = 0;
+    int A_UV_GA = NGA_Create_irreg(C_DBL, 2, dims, (char *)"Auv_temp", chunk, map);
+    if(not A_UV_GA)
+    {
+        throw PSIEXCEPTION("GA failed on creating Aia_ga");
+    }
+    Q_UV_GA_ = GA_Duplicate(A_UV_GA, (char *)"Q|PQ");
+    if(not Q_UV_GA_)
+    {
+        throw PSIEXCEPTION("GA failed on creating GA_Q_PQ");
+    }
+
+    // => ERI Objects <= //
+
+    boost::shared_ptr<IntegralFactory> factory(new IntegralFactory(auxiliary_, BasisSet::zero_ao_basis_set(), primary_, primary_));
+    std::vector<boost::shared_ptr<TwoBodyAOInt> > eri;
+    for (int thread = 0; thread < nthread; thread++) {
+            eri.push_back(boost::shared_ptr<TwoBodyAOInt>(factory->eri()));
+    }
+
+    // => ERI Sieve <= //
+
+    boost::shared_ptr<ERISieve> sieve(new ERISieve(primary_, 1e-10));
+    const std::vector<std::pair<int,int> >& shell_pairs = sieve->shell_pairs();
+    long int nshell_pairs = (long int) shell_pairs.size();
+
+    // => Temporary Tensors <= //
+
+    // > Three-index buffers < //
+    boost::shared_ptr<Matrix> Auv(new Matrix("(Q|mn)", max_rows, nso * (unsigned long int) nso));
+    double** Auvp = Auv->pointer();
+
+    //// ==> Master Loop <== //
+
+    int Auv_begin[2];
+    int Auv_end[2];
+    /// SIMD 
+    ///shell_start represents the start of shells for this processor
+    ///shell_end represents the end of shells for this processor
+    ///NOTE:  This code will have terrible load balance (shells do not correspond to equal number of functions
+    Timer compute_Auv;
+    {
+        int Pstart = shell_start;
+        int Pstop  = shell_end;
+        int nPshell = Pstop - Pstart;
+        int pstart = auxiliary_->shell(Pstart).function_index();
+        int pstop = (Pstop == auxiliary_->nshell() ? auxiliary_->nbf() : auxiliary_->shell(Pstop).function_index());
+        int rows = pstop - pstart;
+
+        // > (Q|mn) ERIs < //
+
+        ::memset((void*) Auvp[0], '\0', sizeof(double) * rows * nso * nso);
+
+        #pragma omp parallel for schedule(dynamic) num_threads(nthread)
+        for (long int PMN = 0L; PMN < nPshell * nshell_pairs; PMN++) {
+
+            int thread = 0;
+            #ifdef _OPENMP
+                thread = omp_get_thread_num();
+            #endif
+
+            int P  = PMN / nshell_pairs + Pstart;
+            int MN = PMN % nshell_pairs;
+            std::pair<int,int> pair = shell_pairs[MN];
+            int M = pair.first;
+            int N = pair.second;
+
+            eri[thread]->compute_shell(P,0,M,N);
+
+            int nm = primary_->shell(M).nfunction();
+            int nn = primary_->shell(N).nfunction();
+            int np = auxiliary_->shell(P).nfunction();
+            int om = primary_->shell(M).function_index();
+            int on = primary_->shell(N).function_index();
+            int op = auxiliary_->shell(P).function_index();
+
+            const double* buffer = eri[thread]->buffer();
+
+            for (int p = 0; p < np; p++) {
+            for (int m = 0; m < nm; m++) {
+            for (int n = 0; n < nn; n++) {
+                Auvp[p + op - pstart][(m + om) * nso + (n + on)] =
+                Auvp[p + op - pstart][(n + on) * nso + (m + om)] =
+                (*buffer++);
+            }}}
+        }
+
+        int ld = nso * nso;
+        NGA_Distribution(A_UV_GA, GA_Nodeid(), Auv_begin, Auv_end);
+        NGA_Put(A_UV_GA, Auv_begin, Auv_end, Auvp[0], &(ld));
+    }
+    printf("\n  P%d Auv took %8.6f s.", GA_Nodeid(), compute_Auv.get());
+
+    Timer J_one_half_time;
+    J_one_half();
+    printf("\n  P%d J^({-1/2}} took %8.6f s.", GA_Nodeid(), J_one_half_time.get());
+
+    Timer GA_DGEMM;
+    GA_Dgemm('T', 'N', naux, nso * nso, naux, 1.0, J_12_GA_, A_UV_GA, 0.0, Q_UV_GA_);
+    printf("\n  P%d DGEMM took %8.6f s.", GA_Nodeid(), GA_DGEMM.get());
+    GA_Destroy(A_UV_GA);
+    GA_Destroy(J_12_GA_);
+
+
+}
+void ParallelDFJK::postiterations()
+{
+    GA_Destroy(Q_UV_GA_);
+}
+void ParallelDFJK::print_header() const
+{
+    outfile->Printf("\n Computing DFJK using %d Processes and %d threads", GA_Nnodes(), omp_get_max_threads());
 }
 
 }}

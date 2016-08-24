@@ -107,32 +107,11 @@ SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
     DFMO.compute_integrals();
     int MY_DF = DFMO.Q_PQ();
     //GA_Print(MY_DF);
-    SharedMatrix Local_Bpq(new Matrix("Local_Bpq",nmo * nmo, naux));
-    int ld[1];
-    ld[0] = nmo * nmo;
-    if(GA_Nodeid() == 0)
-    {
-        std::vector<double> b_buffer(nmo * nmo * naux, 0);
-        for(int i = 0; i < GA_Nnodes(); i++)
-        {
-            int begin_offset[2];
-            int end_offset[2];
-            NGA_Distribution(MY_DF, i, begin_offset, end_offset);
-            printf("\n offset[0] = (%d, %d) offset[1] = (%d, %d)", begin_offset[0], end_offset[0], begin_offset[1], end_offset[1]);
-            NGA_Get(MY_DF, begin_offset, end_offset, &b_buffer[begin_offset[0]], ld);
-        }
-        for(int i = 0; i < naux; i++)
-            for(int pq = 0; pq < nmo * nmo; pq++){
-                size_t offset = i * nmo * nmo;
-                Local_Bpq->set(pq, i, b_buffer[offset + pq]);
-        }
-        Local_Bpq->subtract(Bpq);
-    }
-    outfile->Printf("\n Local_Bpq rms: %8.8f", Local_Bpq->rms());
+    Bpq->print();
 
 
-    /// Compute the PSI4 DFJK
-    /// Compare against this code in all stages
+    ///// Compute the PSI4 DFJK
+    ///// Compare against this code in all stages
     boost::shared_ptr<JK> JK_DFJK(new DFJK(ref_wfn->basisset(), auxiliary));
     JK_DFJK->set_memory(Process::environment.get_memory() * 0.5);
     JK_DFJK->initialize();
@@ -155,8 +134,8 @@ SharedWavefunction paralleldf(SharedWavefunction ref_wfn, Options& options)
 
     SharedMatrix F_mine = JK_Parallel->J()[0];
     F_mine->scale(2.0);
-    F_mine->subtract(JK_Parallel->K()[0]);
-    //F_mine->subtract(F_target);
+    //F_mine->subtract(JK_Parallel->K()[0]);
+    F_mine->subtract(F_target);
 
     outfile->Printf("\n F_mine %8.8f", F_mine->rms());
 

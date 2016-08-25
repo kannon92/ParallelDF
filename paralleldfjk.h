@@ -29,6 +29,7 @@ class ParallelDFJK : public JK {
         ///K_{uv} = C_{v i} B_{uv}^{Q} * C_{p i} B_{qp}^{Q}
         int K_CB1_ = 0;
         int K_CB2_ = 0;
+        bool debug_ = false;
 
 
         void preiterations();

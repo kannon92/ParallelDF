@@ -9,7 +9,7 @@
 #include <omp.h>
 #include <ga.h>
 #include <macdecls.h>
-//#include <mpi.h>
+#include <mpi.h>
 namespace psi { namespace paralleldf {
 
 ParallelDFJK::ParallelDFJK(boost::shared_ptr<BasisSet> primary, boost::shared_ptr<BasisSet> auxiliary) : JK(primary), auxiliary_(auxiliary)
@@ -358,79 +358,62 @@ void ParallelDFJK::compute_qmn()
 }
 void ParallelDFJK::compute_J()
 {
+    ///Some basic information (naux -> auxiliary basis set size
     int naux = auxiliary_->nbf();
-    std::vector<double> J_V(naux, 0);
-    const std::vector<std::pair<int, int> >& function_pairs = sieve_->function_pairs();
-    unsigned long int old_num_nm = function_pairs.size();
+    ///(nso -> number of basis functions
     int nso = D_ao_[0]->rowspi()[0];
     unsigned long int num_nm = nso * nso;
-    outfile->Printf("\n num_nm: %d nso^2: %d", old_num_nm, nso * nso);
-    
+
     SharedVector J_temp(new Vector("Jtemp", num_nm));
     SharedVector D_temp(new Vector("Dtemp", num_nm));
+    ///Vector that will be used for AllReduce
+    SharedVector Global_J_temp(new Vector("Jtemp", num_nm));
     double* D_tempp = D_temp->pointer();
+
+    ///GA specific information (offset[0] will tell what is distributed on each processor
     int begin_offset[2];
     int end_offset[2];
     int index = 0;
+    ///Local q_uv for get and J_V
+    std::vector<double> q_uv_temp;
+    std::vector<double> J_V;
     ///Start a loop over the densities
+    Timer Compute_J_all;
     for(size_t N = 0; N < J_ao_.size(); N++)
     {
+        Timer Compute_J_one;
+        ///This loop is parallelized over MPI
+        ///Q_UV_GA is distributed with auxiliary_index
         double** Dp = D_ao_[N]->pointer();
         double** Jp = J_ao_[N]->pointer();
         index = 0;
-        for(size_t m = 0; m < nso; m++){
-            for(size_t n = 0; n < nso; n++, index++){
-            //int m = function_pairs[mn].first;
-            //int n = function_pairs[mn].second;
-            //D_tempp[index] = (m == n ? Dp[m][n] : Dp[m][n] + Dp[n][m]);
-            D_tempp[index] = Dp[m][n];
-            }
-        }
+        C_DCOPY(nso * nso, Dp[0], 1,D_temp->pointer(), 1);
 
         ///Since Q_UV_GA is distributed via NAUX index,
         ///need to get locality information (where data is located)
         NGA_Distribution(Q_UV_GA_,GA_Nodeid(), begin_offset, end_offset);
         size_t q_uv_size = (end_offset[0] - begin_offset[0] + 1) * nso * nso;
-        std::vector<double> q_uv_temp(q_uv_size, 0);
-        //double* q_uv_temp = new double[q_uv_size];
+        q_uv_temp.resize(q_uv_size);
+        J_V.resize(end_offset[0] - begin_offset[0] + 1);
         int stride = nso * nso;
-        ///Directly use the pointer information that is available to me
-        //NGA_Access(Q_UV_GA_, begin_offset, end_offset, &q_uv_temp[0], &stride);
         NGA_Get(Q_UV_GA_, begin_offset, end_offset, &q_uv_temp[0], &stride);
-        for(int i = 0; i < 2; i++)
-            printf(" P%d offset[0] = (%d, %d) offset[1] = (%d, %d) ", GA_Nodeid(), begin_offset[0], end_offset[0], begin_offset[1], end_offset[1]);
+
         ///J_V = B^Q_{pq} D_{pq}
-        C_DGEMV('N', naux, num_nm, 1.0, &q_uv_temp[0], num_nm, D_tempp, 1, 0.0, &J_V[begin_offset[0]], 1);
+        Timer v_BD;
+        size_t local_naux = end_offset[0] - begin_offset[0] + 1;
+        C_DGEMV('N', local_naux, num_nm, 1.0, &q_uv_temp[0], num_nm, D_tempp, 1, 0.0, &J_V[0], 1);
+        double J_V_norm = 0.0;
+        Timer J_BJ;
         ///J_{uv} = B^{Q}_{uv} J_V^{Q}
-        C_DGEMV('T', naux, num_nm, 1.0, &q_uv_temp[0], num_nm, &J_V[begin_offset[0]], 1, 0.0, J_temp->pointer(), 1);
-        for(int i = 0; i < naux; i++)
-        {
-            if(debug_) printf("\n P%d (%d) dp(J_V): %8.8f ", GA_Nodeid(), i, J_V[i]);
-        }
-        for(int i = 0; i < num_nm; i++)
-        {
-            if(debug_) printf("\n P%d D_tempp[%d] = %8.8f", GA_Nodeid(), i, D_tempp[i]);
-        }
-        int count=0;
-        for(auto q_uv : q_uv_temp) {
-            if(debug_) printf("\n P%d q_uv[%d] = %8.8f", GA_Nodeid(),count,q_uv);
-            count++;
-        }
-        ///Delete the patch of memory
-        //NGA_Release(Q_UV_GA_, begin_offset, end_offset);
+        C_DGEMV('T', local_naux, num_nm, 1.0, &q_uv_temp[0], num_nm, &J_V[0], 1, 0.0, J_temp->pointer(), 1);
         index = 0;
-        for(size_t m = 0; m < nso; m++){
-            for(size_t n = 0; n < nso; n++, index++){
-            //int m = function_pairs[mn].first;
-            //int n = function_pairs[mn].second;
-            //Jp[m][n] += J_temp->pointer()[index];
-            //Jp[n][m] += (m == n ? 0.0 : J_temp->pointer()[index]);
-            Jp[m][n] = J_temp->pointer()[index];
-            Jp[n][m] = J_temp->pointer()[index];
-            if(debug_) printf("\n P%d Jp[%d][%d] = %8.6f", GA_Nodeid(), m, n, Jp[m][n]);
-            }
-        }
+        ///Since every processor has a copy of J_temp, sum all the parts and send to every process
+        MPI_Allreduce(J_temp->pointer(), Global_J_temp->pointer(), num_nm, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+
+        C_DCOPY(nso * nso, Global_J_temp->pointer(), 1,Jp[0], 1);
+        printf("\n P%d Compute_J for %d density takes %8.6f s", GA_Nodeid(), Compute_J_one.get(), N);
     }
+    printf("\nP%d Compute_J takes %8.6f s for %d densities", GA_Nodeid(), Compute_J_all.get(), J_ao_.size());
 }
 void ParallelDFJK::compute_K()
 {

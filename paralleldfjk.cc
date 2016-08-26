@@ -432,8 +432,89 @@ void ParallelDFJK::compute_K()
     /// Only communciation required will be an Allreduce once the K matrix is formed
     /// GA is used, but we will only perform local MM (so we use data on each processor only)
 
+    /// Can have multiple exchange matrices
+    /// GA Specific information
+    int begin_offset[2];
+    int end_offset[2];
+    int index = 0;
+    ///Local q_uv for get and J_V
+    std::vector<double> q_uv_temp;
 
+    ///Since Q_UV_GA is distributed via NAUX index,
+    ///need to get locality information (where data is located)
+    ///Since Q never changes via density, no need to be in loop
+    Timer Get_K_GA;
+    NGA_Distribution(Q_UV_GA_,GA_Nodeid(), begin_offset, end_offset);
+    int stride = end_offset[1] - begin_offset[1] + 1;
+    size_t q_uv_size = (end_offset[0] - begin_offset[0] + 1) * stride;
+    size_t local_naux = (end_offset[0] - begin_offset[0] + 1);
+    q_uv_temp.resize(q_uv_size);
+    NGA_Get(Q_UV_GA_, begin_offset, end_offset, &q_uv_temp[0], &stride);
+    printf("\n P%d GET_K takes %8.6f", GA_Nodeid(), Get_K_GA.get());
 
+ 
+
+    size_t K_size = K_ao_.size();
+    Timer Compute_K_all;
+    for(size_t N = 0; N < K_size; N++)
+    {
+        int nbf = C_left_ao_[N]->rowspi()[0];
+        int nocc = C_left_ao_[N]->colspi()[0];
+        double** Clp = C_left_ao_[N]->pointer();
+        double** Crp = C_right_ao_[N]->pointer();
+        double** Kp  = K_ao_[N]->pointer();
+        SharedMatrix BQ_ui(new Matrix("B^Q_{ui}", nocc, local_naux * nbf));
+        SharedMatrix BQ_vi(new Matrix("B^Q_{vi}", nocc, local_naux * nbf));
+        SharedMatrix BQ_uv(new Matrix("B^Q_{vi}", nbf, local_naux * nbf));
+        SharedMatrix Bm_Qi(new Matrix("B^m_{Qi}", nbf, local_naux * nocc));
+        SharedMatrix Bn_Qi(new Matrix("B^n_{Qi}", nbf, local_naux * nocc));
+        for(int naux = 0; naux < local_naux; naux++)
+            for(int p = 0; p < nbf; p++)
+                for(int i = 0; i < nbf; i++)
+                    BQ_uv->set(i, p * local_naux + naux,q_uv_temp[naux * nbf * nbf + p * nbf + i]);
+
+        if(not nocc) continue; ///If no occupied orbitals skip exchange
+
+        if(N == 0 or C_left_[N].get() != C_left_[N-1].get())
+        {
+
+            C_DGEMM('T', 'N', nocc, local_naux * nbf, nbf, 1.0, Clp[0], nocc, BQ_uv->pointer()[0], local_naux * nbf, 0.0, BQ_ui->pointer()[0], local_naux * nbf);
+            //printf("\n BQ_uiRMS: %8.8f", BQ_ui->rms());
+            for(int i = 0; i < nocc; i++)
+                for(int n = 0; n < local_naux; n++)
+                    for(int m = 0; m < nbf; m++)
+                        Bm_Qi->set(m, n * nocc + i, BQ_ui->get(i, m * local_naux + n));
+
+        if(lr_symmetric_)
+            Bn_Qi = Bm_Qi;
+             
+        }
+        if(!lr_symmetric_ && (N == 0 || C_right_[N].get() != C_right_[N-1].get())) {
+
+            if(C_right_[N].get() == C_left_[N].get()) 
+            {
+                //::memcpy((void*) Bm_Qi->pointer()[0], (void*) Bn_Qi->pointer()[0], sizeof(double) * local_naux * nocc * nbf);
+                Bn_Qi = Bm_Qi;
+            }
+            else {
+            C_DGEMM('T', 'N', nocc, local_naux * nbf, nbf, 1.0, Crp[0], nocc, BQ_uv->pointer()[0], local_naux * nbf, 0.0, BQ_ui->pointer()[0], local_naux * nbf);
+            //printf("\n BQ_uiRMS: %8.8f", BQ_ui->rms());
+            for(int i = 0; i < nocc; i++)
+                for(int n = 0; n < local_naux; n++)
+                    for(int m = 0; m < nbf; m++)
+                        Bn_Qi->set(m, n * nocc + i, BQ_ui->get(i, m * local_naux + n));
+
+            C_DGEMM('N','T', nbf, nbf, local_naux * nocc, 1.0, Bn_Qi->pointer()[0], local_naux * nocc, Bn_Qi->pointer()[0], local_naux * nocc, 0.0, Kp[0], nbf);
+            }
+             
+        }
+        SharedMatrix local_K(new Matrix("K", nbf, nbf));
+        C_DGEMM('N','T', nbf, nbf, local_naux * nocc, 1.0, Bm_Qi->pointer()[0], local_naux * nocc, Bn_Qi->pointer()[0], local_naux * nocc, 0.0, local_K->pointer()[0], nbf);
+        
+        MPI_Allreduce(local_K->pointer()[0],Kp[0], nbf * nbf, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        
+
+    }
 }
 void ParallelDFJK::postiterations()
 {

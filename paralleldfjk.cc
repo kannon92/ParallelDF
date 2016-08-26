@@ -377,8 +377,18 @@ void ParallelDFJK::compute_J()
     ///Local q_uv for get and J_V
     std::vector<double> q_uv_temp;
     std::vector<double> J_V;
-    ///Start a loop over the densities
     Timer Compute_J_all;
+
+    ///Since Q_UV_GA is distributed via NAUX index,
+    ///need to get locality information (where data is located)
+    ///Since Q never changes via density, no need to be in loop
+    NGA_Distribution(Q_UV_GA_,GA_Nodeid(), begin_offset, end_offset);
+    size_t q_uv_size = (end_offset[0] - begin_offset[0] + 1) * nso * nso;
+    q_uv_temp.resize(q_uv_size);
+    J_V.resize(end_offset[0] - begin_offset[0] + 1);
+    int stride = nso * nso;
+    NGA_Get(Q_UV_GA_, begin_offset, end_offset, &q_uv_temp[0], &stride);
+    ///Start a loop over the densities
     for(size_t N = 0; N < J_ao_.size(); N++)
     {
         Timer Compute_J_one;
@@ -389,14 +399,6 @@ void ParallelDFJK::compute_J()
         index = 0;
         C_DCOPY(nso * nso, Dp[0], 1,D_temp->pointer(), 1);
 
-        ///Since Q_UV_GA is distributed via NAUX index,
-        ///need to get locality information (where data is located)
-        NGA_Distribution(Q_UV_GA_,GA_Nodeid(), begin_offset, end_offset);
-        size_t q_uv_size = (end_offset[0] - begin_offset[0] + 1) * nso * nso;
-        q_uv_temp.resize(q_uv_size);
-        J_V.resize(end_offset[0] - begin_offset[0] + 1);
-        int stride = nso * nso;
-        NGA_Get(Q_UV_GA_, begin_offset, end_offset, &q_uv_temp[0], &stride);
 
         ///J_V = B^Q_{pq} D_{pq}
         Timer v_BD;
@@ -417,6 +419,21 @@ void ParallelDFJK::compute_J()
 }
 void ParallelDFJK::compute_K()
 {
+    /// K_{uv} = D_{pq} B^{Q}_{up} * B^{Q}_{vq}
+    /// Step 1:  Use def of D = \sum_{i} C_{pi}C_{qi}
+    /// Step 2:  Perform a one index transform  (N^4)
+    ///          B^{Q}_{ui} = C_{pi} B^{Q}_{up}
+    ///          B^{Q}_{vi} = C_{qi} B^{Q}_{vq}
+    /// Step 3:  Compute K_{uv} = \sum_{Q} \sum_{i} B^{Q}_{ui} B^{Q}_{vi}
+
+    /// The first iteration of this job will assume that B tensor is distributed 
+    /// via the Q index.
+    /// This means that all of these steps will be performed locally for every process
+    /// Only communciation required will be an Allreduce once the K matrix is formed
+    /// GA is used, but we will only perform local MM (so we use data on each processor only)
+
+
+
 }
 void ParallelDFJK::postiterations()
 {

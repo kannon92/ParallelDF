@@ -463,27 +463,27 @@ void ParallelDFJK::compute_K()
         double** Clp = C_left_ao_[N]->pointer();
         double** Crp = C_right_ao_[N]->pointer();
         double** Kp  = K_ao_[N]->pointer();
-        SharedMatrix BQ_ui(new Matrix("B^Q_{ui}", nocc, local_naux * nbf));
-        SharedMatrix BQ_vi(new Matrix("B^Q_{vi}", nocc, local_naux * nbf));
-        SharedMatrix BQ_uv(new Matrix("B^Q_{vi}", nbf, local_naux * nbf));
+        SharedMatrix BQ_ui(new Matrix("B^Q_{ui}", local_naux * nbf, nocc));
+        SharedMatrix BQ_vi(new Matrix("B^Q_{vi}", local_naux * nbf, nocc));
         SharedMatrix Bm_Qi(new Matrix("B^m_{Qi}", nbf, local_naux * nocc));
         SharedMatrix Bn_Qi(new Matrix("B^n_{Qi}", nbf, local_naux * nocc));
-        for(int naux = 0; naux < local_naux; naux++)
-            for(int p = 0; p < nbf; p++)
-                for(int i = 0; i < nbf; i++)
-                    BQ_uv->set(i, p * local_naux + naux,q_uv_temp[naux * nbf * nbf + p * nbf + i]);
 
         if(not nocc) continue; ///If no occupied orbitals skip exchange
 
         if(N == 0 or C_left_[N].get() != C_left_[N-1].get())
         {
+            Timer B_C_halftrans;
 
-            C_DGEMM('T', 'N', nocc, local_naux * nbf, nbf, 1.0, Clp[0], nocc, BQ_uv->pointer()[0], local_naux * nbf, 0.0, BQ_ui->pointer()[0], local_naux * nbf);
-            //printf("\n BQ_uiRMS: %8.8f", BQ_ui->rms());
-            for(int i = 0; i < nocc; i++)
-                for(int n = 0; n < local_naux; n++)
-                    for(int m = 0; m < nbf; m++)
-                        Bm_Qi->set(m, n * nocc + i, BQ_ui->get(i, m * local_naux + n));
+            C_DGEMM('N', 'N', local_naux * nbf, nocc, nbf, 1.0, &q_uv_temp[0], nbf, Clp[0], nocc, 0.0, BQ_ui->pointer()[0], nocc);
+            printf("\n P%d B * C takes %8.4f", GA_Nodeid(), B_C_halftrans.get());
+
+            Timer swap_index;
+            #pragma omp parallel for
+            for(int n = 0; n < local_naux; n++)
+                for(int m = 0; m < nbf; m++)
+                    C_DCOPY(nocc, &BQ_ui->pointer()[0][n * nbf * nocc + m * nocc], 1, &Bm_Qi->pointer()[0][m * local_naux * nocc + n * nocc], 1);
+
+            printf("\n P%d Bm_Qi to BQ_ui takes %8.4f s", GA_Nodeid(), swap_index.get());
 
         if(lr_symmetric_)
             Bn_Qi = Bm_Qi;
@@ -497,24 +497,28 @@ void ParallelDFJK::compute_K()
                 Bn_Qi = Bm_Qi;
             }
             else {
-            C_DGEMM('T', 'N', nocc, local_naux * nbf, nbf, 1.0, Crp[0], nocc, BQ_uv->pointer()[0], local_naux * nbf, 0.0, BQ_ui->pointer()[0], local_naux * nbf);
-            //printf("\n BQ_uiRMS: %8.8f", BQ_ui->rms());
-            for(int i = 0; i < nocc; i++)
-                for(int n = 0; n < local_naux; n++)
-                    for(int m = 0; m < nbf; m++)
-                        Bn_Qi->set(m, n * nocc + i, BQ_ui->get(i, m * local_naux + n));
+            C_DGEMM('N', 'N',local_naux * nbf, nocc, nbf, 1.0, &q_uv_temp[0], nbf, Crp[0], nocc, 0.0, BQ_ui->pointer()[0], nocc);
 
-            C_DGEMM('N','T', nbf, nbf, local_naux * nocc, 1.0, Bn_Qi->pointer()[0], local_naux * nocc, Bn_Qi->pointer()[0], local_naux * nocc, 0.0, Kp[0], nbf);
+            #pragma omp parallel for
+            for(int n = 0; n < local_naux; n++)
+                for(int m = 0; m < nbf; m++)
+                    C_DCOPY(nocc, &BQ_ui->pointer()[0][n * nbf * nocc + m * nocc], 1, &Bn_Qi->pointer()[0][m * local_naux * nocc + n * nocc], 1);
+
             }
              
         }
         SharedMatrix local_K(new Matrix("K", nbf, nbf));
+        Timer Final_K;
         C_DGEMM('N','T', nbf, nbf, local_naux * nocc, 1.0, Bm_Qi->pointer()[0], local_naux * nocc, Bn_Qi->pointer()[0], local_naux * nocc, 0.0, local_K->pointer()[0], nbf);
+        printf("\n P%d Final_K takes %8.4f s", GA_Nodeid(), Final_K.get());
         
+        Timer ALLREDUCE;
         MPI_Allreduce(local_K->pointer()[0],Kp[0], nbf * nbf, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+        printf("\n P%d ALLREDUCE takes %8.4f s", GA_Nodeid(), ALLREDUCE.get());
         
 
     }
+    printf("\n P%d for Compute K with %d densities %8.4f s", GA_Nodeid(), D_ao_.size(), Compute_K_all.get());
 }
 void ParallelDFJK::postiterations()
 {
